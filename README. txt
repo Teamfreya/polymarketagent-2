@@ -1,0 +1,179 @@
+Polymarket BTC 15-Minute Bot - Complete Trading Logic
+🎯 Market & Execution
+Target Market
+Market: Polymarket "Bitcoin Up or Down" 15-minute binary options
+Market Slug: btc-updown-15m-{timestamp}
+Scan Frequency: Every 15 seconds
+Position Limit: 1 trade per event (no re-entries)
+Order Execution
+Order Type: Limit BUY at best ask
+Position Size: 25 shares (fixed)
+Direction: UP = token[0], DOWN = token[1]
+✅ Entry Requirements (ALL Must Pass)
+1. Time Window
+Required: 4.00 - 10.00 minutes remaining before expiry
+Rejection: "Time {X} not in [4, 10]"
+2. Dynamic Spread Filter
+Formula: min_spread = max(40, min(180, 0.5 × volatility))
+
+Minimum: $40
+Maximum: $180 (cap)
+Current: $87.85 (based on $175.69 volatility)
+Requirement: |BTC_Price - Strike_Price| ≥ min_spread
+
+Direction:
+
+UP: BTC > Strike + min_spread
+DOWN: BTC < Strike - min_spread
+3. EMA Trend Confirmation
+Indicator: 2-hour EMA13
+Update: Every 30 minutes
+Rules:
+UP trades: BTC > EMA13
+DOWN trades: BTC < EMA13
+Rejection: "Trend Mismatch: Direction {X} but BTC ${Y} {≤/≥} EMA ${Z}"
+4. No Existing Position
+Event ID not in processed_events
+Event not in _in_flight reservations
+Rejection: "Already active in this event"
+5. Risk Limits
+All must pass:
+
+Daily PnL > -$80
+Weekly PnL > -$120
+Not in 48-hour pause
+Not skipping signals (streak protection)
+🔒 Duplicate Prevention (4 Layers)
+Layer 1: Process-Level Lock
+File: 
+/tmp/polymarket_btc_15m_bot.lock
+Type: OS-level fcntl.flock (exclusive, non-blocking)
+Scope: Prevents multiple bot instances from starting
+Release: Automatic on process exit
+Layer 2: Cycle-Level Mutex
+Type: Threading lock (non-blocking)
+Scope: Prevents overlapping 
+run_cycle_full()
+ calls
+Release: End of cycle
+Layer 3: Event Reservation
+Type: In-memory dict with timestamps
+Scope: Atomic event-level tracking
+Expiry: 300 seconds
+Release: Never released after ORDER_SENT (kept until expiry)
+Layer 4: Idempotency Tracking
+Type: Set of event_id:direction keys
+Scope: Permanent record of attempts
+Marking: Immediately after ORDER_SENT
+📋 Order Execution Flow (NEW - Fixed)
+Pre-Trade Checks
+Acquire cycle lock (non-blocking)
+Check pending orders asynchronously
+Cleanup expired reservations (>300s)
+Fetch BTC price and market data
+Check safety locks
+Discover current 15m event
+Calculate/cache strike price
+Check time window (4-10 min)
+Calculate spread requirement
+Check EMA trend alignment
+Verify no existing position
+Try to reserve event (atomic)
+Check risk limits
+Order Placement (IMMEDIATE PROCESSING)
+python
+# 1. Place order
+resp = client.place_limit_order(token_id, "BUY", limit_price, 25)
+# 2. If successful (has orderID):
+if resp and resp.get('orderID'):
+    # Log ORDER_SENT
+    
+    # 3. IMMEDIATELY mark as processed (NEW FIX)
+    pending_order = {
+        'order_id': resp['orderID'],
+        'event_id': event_id,
+        'status': 'PENDING'
+    }
+    state.add_pending_order(pending_order)  # Marks event as processed
+    mark_attempt(event_id, direction)       # Idempotency
+    # Keep reservation (never release)
+    
+# 3. If failed (no orderID):
+else:
+    # Release reservation
+    # Allow retry in next cycle
+Async Order Finalization
+python
+# Every cycle, check pending orders:
+for order in get_pending_orders():
+    status = get_order_status(order['order_id'])
+    
+    if status == 'MATCHED':
+        finalize_order(order_id, 'FILLED')
+        record_trade(order)
+    
+    elif status in ['CANCELLED', 'EXPIRED']:
+        finalize_order(order_id, status)
+Key Change: No immediate status check, no cancel+retry logic
+
+🛡️ Risk Management
+Daily Loss Limit
+Threshold: -$80
+Action: Stop all trading for the day
+Reset: Midnight UTC
+Weekly Loss Limit
+Threshold: -$120
+Action: Pause 48 hours
+Reset: Start of ISO week
+Consecutive Loss Protection
+Trigger: 3 losses in a row
+Action: Skip next 5 valid signals
+Reset: After 5 skips
+📊 Strike Price Logic (Waterfall)
+Check cache - Already fetched for this event?
+Parse groupItemTitle - Extract from metadata
+Parse title - Look for price pattern
+Parse description - Check event description
+Fetch from Binance - Historical price at market start
+Use current BTC - Last resort fallback
+Cache: Strike price cached per event_id for consistency
+
+📈 Volatility Calculation
+Source: Binance BTC/USDT 1-minute candles (last 60)
+Method: Median of absolute price changes
+Update: Every cycle (~15 seconds)
+Current: $175.69 → Spread requirement $87.85
+🚫 Trade Rejection Reasons
+Outside 4-10 minute window
+Spread < dynamic threshold
+EMA trend mismatch
+Already traded this event
+Event in-flight (duplicate prevention)
+Daily loss limit (-$80)
+Weekly loss limit (-$120)
+In 48-hour pause
+Streak protection active
+No orderbook asks
+Token IDs not found
+Price exactly at strike (diff=0)
+EMA data unavailable
+🔄 State Persistence
+bot_state.json
+Daily/weekly PnL
+Consecutive losses
+Processed events list
+Pending orders (NEW)
+Active trades
+Pause status
+activity_log.csv
+Timestamp, Event ID, Minutes left
+BTC price, Strike, Diff, Momentum
+Action (SKIP/TRADE_EXEC/ORDER_SENT/etc.)
+Details, Balance
+⚙️ Current Configuration
+Volatility: $175.69
+Spread Required: $87.85
+Strategy Mode: Weekday Strict (overridden by dynamic spread)
+Process Lock: Active
+Bot PID: 5225
+Status: Running
